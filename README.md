@@ -57,3 +57,23 @@ python review_frames.py clip.mp4 results/review --frames 154 161 168
 ```
 
 `moving_track_speeds.csv` 每行对应一个通过筛选的连续单球轨迹段，平均速率按总路径长度除以持续时间计算。`steps.csv` 每行对应其中一对相邻帧，轨迹较长的颗粒贡献的步数更多。这两种统计给出的平均值可以不同。固定参照保持原位而许多颗粒共同向一侧移动时，以画面为参考的速率含有共同流动的贡献。
+
+## 区分平台平移与颗粒群共同运动
+
+下例复现 40× 视频整段的分析。把命令中的 `clip.mp4` 换成原视频路径。坐标仅适用于该片。其他视频需要在清晰参考帧中重新选择分布在不同位置的固定纹理，并留出一组独立验证点。导出 H.264 视频需要系统路径下有支持 libx264 的 FFmpeg。
+
+```sh
+python track.py clip.mp4 --diameter-px 5.5 --snr 7 --link-px 6 --min-frames 15 --motion-px 3 --out results/40x-full
+python fiducial_drift.py clip.mp4 --reference-frame 161 \
+  --mark 38,158 488,124 1113,78 61,385 513,355 789,346 746,472 1109,471 341,499 982,704 \
+  --holdout 342,57 785,74 456,195 1124,275 207,587 1109,723 --out results/40x-reference-checked
+python analyze_motion.py results/40x-full results/40x-reference-checked/shift.csv
+python motion_figures.py results/40x-full/correction
+python render_motion_video.py clip.mp4 results/40x-full
+```
+
+1. 运动单球的筛选沿用前面的形态、连续性和运动跨度要求。用固定纹理在每一帧相对同一参考帧测量平移，再用相邻帧的平移差校正单球的 x、y 位移。只有图像纹理确实固定于样品池时，测得的共同平移才能直接代表载物台相对相机的平移。低置信度的平移保留为空值。
+2. 按轨迹编号将单球随机分为两组（固定种子）。逐帧用另一组至少 8 颗单球的 x、y 位移中位数估计共同运动，从本颗粒位移中扣除后再计算速率。对所有颗粒进行相同的平移参照校正后再去除共同运动，与直接在相机坐标中去除颗粒群共同运动具有相同残差。该步骤可以去掉整体输运，不能单独确定输运的物理来源。
+3. 速度分布图仅纳入三种速率都有数据的同一批相邻帧位置对。二维均方位移（MSD）由同一轨迹上连续有效的步长累计得到，避免跨越缺帧或参照失效的区间。各时间间隔按有效位置对数加权。表观扩散系数取短时线性拟合斜率的四分之一；另用对数斜率检查 MSD 与时间是否近似成正比。较长的轨迹贡献较多位置对，结果受运动筛选、定位噪声及剩余流动影响。
+
+结果目录 `correction` 包含标注视频 `annotated.mp4`、速度分布图 `speed_distribution.png` 和均方位移图 `msd.png`。`steps.csv.gz` 与 `moving_segments.csv` 分别记录逐步和逐段速率，`drift.csv` 记录逐帧参照平移差与全体运动单球代表位移，`msd.csv` 给出 MSD 及有效位置对数。视频右侧三条例子使用与速度表相同的残差。
