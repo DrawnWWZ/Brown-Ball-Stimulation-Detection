@@ -46,3 +46,14 @@ python check_truth.py
 默认测试生成 80 帧，包含 4 颗运动单球、2 个固定点、1 个移动双球和 1 个移动大斑点，还加入了光照起伏、相机噪声、脉冲噪声和轻微整体抖动。程序通过命令行入口运行，按已知坐标核对身份、筛除结果和速度。默认种子中，316 个真实单球步长全部匹配，固定点和团聚体均未混入速度表。定位均方根误差 0.097 px，20 fps 下速率平均绝对误差 1.51 px/s。
 
 另用公开的水中 1 µm 乳胶球实拍序列跑通了 300 帧。按单球表观宽度 4 px、24 fps、2.85 px/µm 运行，得到 98,560 个有效步长。公开样片没有逐粒子真值，这个数用于复现流程。实际 40× 样品的筛选效果仍须结合其原始连续画面核对。[Trackpy 原始数据和采集说明](https://github.com/soft-matter/trackpy-examples/tree/09fb3074a173585d48b5001b5b4b7e6479999598/sample_data/bulk_water)
+
+## 从原视频抽几帧复核
+
+用完整的一段连续画面判定运动状态，再导出其中几个时刻的截图。下例取 7 fps 视频的第 140 至 210 帧（含两端，20–30 秒），CSV 和截图都使用原视频从 0 开始的帧号。先用单球的表观宽度和固定斑点的定位抖动确定各自视频所需的阈值。
+
+```sh
+python track.py clip.mp4 --start-frame 140 --frame-count 71 --diameter-px 5.5 --snr 7 --link-px 6 --min-frames 15 --motion-px 3 --overlay-video --out results/review
+python review_frames.py clip.mp4 results/review --frames 154 161 168
+```
+
+`moving_track_speeds.csv` 每行对应一个通过筛选的连续单球轨迹段，平均速率按总路径长度除以持续时间计算。`steps.csv` 每行对应其中一对相邻帧，轨迹较长的颗粒贡献的步数更多。这两种统计给出的平均值可以不同。固定参照保持原位而许多颗粒共同向一侧移动时，以画面为参考的速率含有共同流动的贡献。

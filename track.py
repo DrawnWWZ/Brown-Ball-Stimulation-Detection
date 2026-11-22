@@ -3,6 +3,7 @@ import argparse
 from collections import Counter, defaultdict
 import csv
 import json
+from itertools import islice
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
@@ -65,6 +66,11 @@ def frames_from(path):
             movie.release()
 
 
+def selected_frames(args):
+    stop = None if args.frame_count is None else args.start_frame + args.frame_count
+    return enumerate(islice(frames_from(args.input), args.start_frame, stop), start=args.start_frame)
+
+
 def channel(frame):
     if frame.dtype != np.uint8:
         raise ValueError("Supply 8-bit images. Convert higher depths with one fixed intensity range.")
@@ -106,9 +112,9 @@ def track(args):
     previous_ids = []
     next_id = 1
     reference = window = shape = None
-    for n, frame in enumerate(frames_from(args.input)):
+    for n, frame in selected_frames(args):
         gray = channel(frame)
-        if n == 0:
+        if n == args.start_frame:
             shape = gray.shape
         if gray.shape != shape:
             raise ValueError("Frame dimensions changed.")
@@ -116,7 +122,7 @@ def track(args):
         response = None
         if args.stabilize:
             current = registration_image(gray)
-            if n == 0:
+            if n == args.start_frame:
                 reference = current
                 window = cv2.createHanningWindow(shape[::-1], cv2.CV_32F)
             else:
@@ -124,7 +130,7 @@ def track(args):
                 xy, response = cv2.phaseCorrelate(reference * window, current * window)
                 shift = np.asarray(xy)
                 if not np.isfinite(shift).all() or not np.isfinite(response) or response < 0.15:
-                    raise ValueError(f"Registration to frame 0 unreliable at frame {n}. "
+                    raise ValueError(f"Registration to first selected frame unreliable at frame {n}. "
                                      "Use a shorter stable clip or omit --stabilize.")
         shifts.append((n, *shift, response))
         observations = detect(gray, args.diameter_px, args.polarity, args.snr)
@@ -144,6 +150,8 @@ def track(args):
                              x_corrected_px=r["x"] - shift[0], y_corrected_px=r["y"] - shift[1],
                              diameter_px=r["diameter_px"], status=r["status"]))
         previous, previous_ids = xy, ids
+    if not shifts or (args.frame_count is not None and len(shifts) != args.frame_count):
+        raise ValueError("Requested frame interval lies outside the recording.")
     return rows, shifts
 
 
@@ -176,6 +184,21 @@ def classify(rows, nframes, args):
                                   speed_um_s=length * args.fps * args.um_per_px
                                   if args.fps and args.um_per_px else None))
     return steps
+
+
+def moving_track_speeds(steps, fps, um_per_px):
+    """Average path speed for each accepted segment; all steps are consecutive."""
+    groups = defaultdict(list)
+    for step in steps:
+        groups[step["track_id"]].append(step)
+    for track_id, group in groups.items():
+        first, last = group[0]["frame_from"], group[-1]["frame_to"]
+        length = sum(step["step_px"] for step in group)
+        elapsed = (last - first) / fps if fps else None
+        speed = length / elapsed if elapsed else None
+        yield dict(track_id=track_id, first_frame=first, last_frame=last, steps=len(group),
+                   path_px=length, duration_s=elapsed, mean_speed_px_s=speed,
+                   mean_speed_um_s=speed * um_per_px if speed is not None and um_per_px else None)
 
 
 def write_csv(path, fields, rows):
@@ -219,7 +242,8 @@ def run(args):
                    motion_px=args.motion_px, min_frames=args.min_frames, stabilized=args.stabilize,
                    polarity=args.polarity, detections_by_status=dict(Counter(r["status"] for r in rows)),
                    segments_by_status=dict(Counter(track_status.values())), accepted_steps=len(steps),
-                   preview_frame=nframes // 2)
+                   first_frame=shifts[0][0], last_frame=shifts[-1][0],
+                   preview_frame=shifts[nframes // 2][0])
     for key in ("step_px", "speed_px_s", "speed_um_s"):
         vals = [s[key] for s in steps if s[key] is not None]
         summary["median_" + key] = float(np.median(vals)) if vals else None
@@ -236,12 +260,16 @@ def run(args):
                                        "y_corrected_px", "diameter_px", "status"], rows)
         write_csv(out / "steps.csv", ["track_id", "frame_from", "frame_to", "dx_px", "dy_px",
                                       "step_px", "speed_px_s", "speed_um_s"], steps)
+        write_csv(out / "moving_track_speeds.csv",
+                  ["track_id", "first_frame", "last_frame", "steps", "path_px", "duration_s",
+                   "mean_speed_px_s", "mean_speed_um_s"],
+                  moving_track_speeds(steps, args.fps, args.um_per_px))
         if args.stabilize:
             write_csv(out / "registration.csv", ["frame", "shift_x_px", "shift_y_px", "response"],
                       [dict(frame=n, shift_x_px=x, shift_y_px=y, response=q) for n, x, y, q in shifts])
         writer = None
         try:
-            for n, frame in enumerate(frames_from(args.input)):
+            for n, frame in selected_frames(args):
                 middle = n == summary["preview_frame"]
                 if not middle and not args.overlay_video:
                     continue
@@ -275,6 +303,8 @@ def main():
     p.add_argument("--diameter-px", required=True, type=float, help="single-bead FWHM in pixels")
     p.add_argument("--polarity", choices=["dark", "bright"], default="dark")
     p.add_argument("--snr", type=float, default=5.0)
+    p.add_argument("--start-frame", type=int, default=0, help="first input frame to analyze (zero-based)")
+    p.add_argument("--frame-count", type=int, help="number of consecutive frames to analyze")
     p.add_argument("--fps", type=float, help="uniform acquisition rate; overrides video metadata")
     p.add_argument("--um-per-px", type=float, help="stage micrometer calibration")
     p.add_argument("--link-px", type=float, help="maximum step, default one bead diameter")
@@ -283,6 +313,8 @@ def main():
     p.add_argument("--overlay-video", action="store_true", help="save annotated MP4 for visual review")
     p.add_argument("--stabilize", action="store_true", help="align using fixed field texture")
     args = p.parse_args()
+    if args.start_frame < 0 or (args.frame_count is not None and args.frame_count <= 0):
+        p.error("Use nonnegative start frame and a positive frame count.")
     if not args.input.exists():
         p.error("Input does not exist.")
     if args.out.exists():
